@@ -203,6 +203,7 @@ module module_NoahMP_hrldas_driver
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  WOODXY    ! mass of wood (incl. woody roots) [g/m2]
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  GRAINXY   ! XING mass of grain!THREE
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  GDDXY     ! XINGgrowingdegressday
+  REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  TAVEXY    ! ZHErunningaveragetemperature
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  STBLCPXY  ! stable carbon in deep soil [g/m2]
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  FASTCPXY  ! short-lived carbon, shallow soil [g/m2]
   REAL,    ALLOCATABLE, DIMENSION(:,:)    ::  LAI       ! leaf area index
@@ -1177,6 +1178,7 @@ module module_NoahMP_hrldas_driver
   ALLOCATE ( WOODXY    (XSTART:XEND,YSTART:YEND) )  ! mass of wood (incl. woody roots) [g/m2]
   ALLOCATE ( GRAINXY   (XSTART:XEND,YSTART:YEND) )  ! mass of grain XING [g/m2]
   ALLOCATE ( GDDXY     (XSTART:XEND,YSTART:YEND) )  ! growing degree days XING FOUR
+  ALLOCATE ( TAVEXY    (XSTART:XEND,YSTART:YEND) )  ! running average temperature ZHE
   ALLOCATE ( STBLCPXY  (XSTART:XEND,YSTART:YEND) )  ! stable carbon in deep soil [g/m2]
   ALLOCATE ( FASTCPXY  (XSTART:XEND,YSTART:YEND) )  ! short-lived carbon, shallow soil [g/m2]
   ALLOCATE ( LAI       (XSTART:XEND,YSTART:YEND) )  ! leaf area index
@@ -1917,10 +1919,10 @@ ENDIF
   PLANTING   = 126     ! default planting date
   HARVEST    = 290     ! default harvest date
   SEASON_GDD = 1605    ! default total seasonal growing degree days
-  if (crop_option == 1) then ! use crop_option=1 for reading crop extra fields
-    CALL READ_CROP_INPUT(HRLDAS_SETUP_FILE, XSTART, XEND, YSTART, YEND,&
-                         CROPTYPE,PLANTING,HARVEST,SEASON_GDD)
-  end if
+  !if (crop_option == 1) then ! use crop_option=1 for reading crop extra fields
+  !  CALL READ_CROP_INPUT(HRLDAS_SETUP_FILE, XSTART, XEND, YSTART, YEND,&
+  !                       CROPTYPE,PLANTING,HARVEST,SEASON_GDD)
+  !end if
 
 !------------------------------------------------------------------------
 ! For IOPT_TDRN = 1 or 2 READ TILE DRAIN MAP
@@ -1983,6 +1985,7 @@ ENDIF
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "WOOD"    , WOODXY   )
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "GRAIN"   , GRAINXY  )
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "GDD"     , GDDXY    )
+     call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "TAVE"    , TAVEXY   )
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "STBLCP"  , STBLCPXY )
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "FASTCP"  , FASTCPXY )
      call get_from_restart(xstart, xend, xstart, ixfull, jxfull, "LAI"     , LAI      )
@@ -2147,7 +2150,7 @@ ENDIF
                   FWETXY, SNEQVOXY, ALBOLDXY,  QSNOWXY, QRAINXY,  WSLAKEXY,    ZWTXY,     WAXY, &
                     WTXY,   TSNOXY,  ZSNSOXY,  SNICEXY,  SNLIQXY, LFMASSXY, RTMASSXY, &
                 STMASSXY,   WOODXY, STBLCPXY, FASTCPXY,   XSAIXY, LAI,                    &
-                 GRAINXY,    GDDXY,                                                   &
+                 GRAINXY,    GDDXY,   TAVEXY,                                         &
                 CROPTYPE,  CROPCAT,                                                   &
                 irnumsi  ,irnummi  ,irnumfi  ,irwatsi,    &
                 irwatmi  ,irwatfi  ,ireloss  ,irsivol,    &
@@ -2300,7 +2303,7 @@ ENDIF
                   FWETXY, SNEQVOXY, ALBOLDXY,  QSNOWXY, QRAINXY,  WSLAKEXY,    ZWTXY,     WAXY, &
                     WTXY,   TSNOXY,  ZSNSOXY,  SNICEXY,  SNLIQXY, LFMASSXY, RTMASSXY, &
                 STMASSXY,   WOODXY, STBLCPXY, FASTCPXY,   XSAIXY, LAI,                    &
-                 GRAINXY,    GDDXY,                                                   &
+                 GRAINXY,    GDDXY,   TAVEXY,                                         &
                 CROPTYPE,  CROPCAT,                                                   &
                 irnumsi  ,irnummi  ,irnumfi  ,irwatsi,    &
                 irwatmi  ,irwatfi  ,ireloss  ,irsivol,    &
@@ -2651,7 +2654,7 @@ end subroutine land_driver_ini
 		QSNOWXY,  QRAINXY, WSLAKEXY,    ZWTXY, WAXY,WTXY,     TSNOXY, &
 		ZSNSOXY,  SNICEXY,  SNLIQXY, LFMASSXY,  RTMASSXY,   STMASSXY, &
 		 WOODXY, STBLCPXY, FASTCPXY,      LAI,    XSAIXY,    TAUSSXY, &
-	        SMOISEQ, SMCWTDXY,DEEPRECHXY,  RECHXY,   GRAINXY,      GDDXY,PGSXY, & ! IN/OUT Noah MP only
+	        SMOISEQ, SMCWTDXY,DEEPRECHXY,  RECHXY,   GRAINXY,      GDDXY,TAVEXY,PGSXY, & ! IN/OUT Noah MP only
                 GECROS_STATE,                                                 & ! IN/OUT gecros model
                 QTDRAIN,   TD_FRACTION,                                       & ! IN/OUT tile drainage
 	         T2MVXY,   T2MBXY,   Q2MVXY,   Q2MBXY,                        &
@@ -2932,11 +2935,13 @@ end subroutine land_driver_ini
               call add_to_output(WOODXY     , "WOOD"    , "Mass of wood and woody roots"         , "g m{-2}"               )
               call add_to_output(GRAINXY    , "GRAIN"   , "Mass of grain "                       , "g m{-2}"               ) !XING!THREE
               call add_to_output(GDDXY      , "GDD"     , "Growing degree days(10) "             , ""                      ) !XING
+              call add_to_output(TAVEXY     , "TAVE"    , "running average temperature"          , ""                      ) !ZHE
               call add_to_output(STBLCPXY   , "STBLCP"  , "Stable carbon in deep soil"           , "g m{-2}"               )
               call add_to_output(FASTCPXY   , "FASTCP"  , "Short-lived carbon in shallow soil"   , "g m{-2}"               )
               call add_to_output(NEEXY      , "NEE"     , "Net ecosystem exchange"                 , "g m{-2} s{-1} CO2"   )
               call add_to_output(GPPXY      , "GPP"     , "Net instantaneous assimilation"         , "g m{-2} s{-1} C"     )
               call add_to_output(NPPXY      , "NPP"     , "Net primary productivity"               , "g m{-2} s{-1} C"     )
+              call add_to_output(PGSXY      , "PGS"     , "Plant growing stage"                    , ""                    )
               call add_to_output(PSNXY      , "PSN"     , "Total photosynthesis"                   , "umol CO@ m{-2} s{-1}")
               call add_to_output(APARXY     , "APAR"    , "Photosynthesis active energy by canopy" , "W m{-2}"             )
         ! additional NoahMP output
@@ -3116,6 +3121,7 @@ subroutine lsm_restart()
   call add_to_restart(WOODXY    , "WOOD"  )
   call add_to_restart(GRAINXY   , "GRAIN" )
   call add_to_restart(GDDXY     , "GDD"   )
+  call add_to_restart(TAVEXY    , "TAVE"  )
   call add_to_restart(STBLCPXY  , "STBLCP")
   call add_to_restart(FASTCPXY  , "FASTCP")
   call add_to_restart(LAI       , "LAI"   )
