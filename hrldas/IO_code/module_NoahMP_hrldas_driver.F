@@ -1110,7 +1110,7 @@ contains
               call add_to_output(NoahmpIO%COSZEN     , "COSZ"    , "Cosine of zenith angle"               , "-"                     )
               call add_to_output(NoahmpIO%GLW        , "LWFORC"  , "Longwave forcing"                     , "W/m2"                  )
               call add_to_output(NoahmpIO%RAINBL     , "RAINRATE", "Precipitation rate"                   , "mm/timestep"           )
-             Grid energy budget terms
+            ! Grid energy budget terms
               call add_to_output(NoahmpIO%EMISS      , "EMISS"   , "Grid emissivity"                      , "-"                     )
               call add_to_output(NoahmpIO%FSAXY      , "FSA"     , "Total absorbed SW radiation"          , "W/m2"                  )         
               call add_to_output(NoahmpIO%FIRAXY     , "FIRA"    , "Total net LW radiation to atmosphere" , "W/m2"                  )
