@@ -1175,18 +1175,40 @@ MODULE MODULE_MPP_LAND
   ! calculate the nx and ny based on the total nprocs.
     integer nprocs, nx, ny
     integer i,j, max
-    max = nprocs
-    do j = 1, nprocs
-       if( mod(nprocs,j) .eq. 0 ) then
-           i = nprocs/j
-           if( abs(i-j) .lt. max) then
-               max = abs(i-j)
-               nx = i 
-               ny = j 
-           end if
-       end if
-    end do
-  return 
+  
+    ! ------------------------------------------------------------------
+    ! hrldas_mpas_mmf (Z. Zhang): FORCE the 1-D (x-only) process grid.
+    !
+    ! The MPAS vector mesh has global_ny = 1.  The original nearly-square
+    ! factorization below (e.g. 16 -> 4x4) hands every process-row except
+    ! one an EMPTY y-patch (ystart > yend), which the MPAS geometry guard
+    ! in module_hrldas_netcdf_io rejects (observed: 12 of 16 ranks abort).
+    !
+    ! A domain-aware fix (test global_ny == 1) is NOT possible here:
+    ! getNX_NY runs from LOG_MAP2d/MPP_LAND_INIT before the domain
+    ! dimensions are read (MPP_LAND_PAR_INI receives them later), and the
+    ! neighbor topology is already frozen by then.  This fork is
+    ! vector-mesh only, so the 1-D grid is always correct; even for a
+    ! structured 2-D domain a 1-D strip decomposition remains valid
+    ! (merely less halo-efficient).
+    ! ------------------------------------------------------------------
+    nx = nprocs
+    ny = 1
+    return
+
+    ! original nearly-square factorization (disabled in this fork):
+    !max = nprocs
+    !do j = 1, nprocs
+    !   if( mod(nprocs,j) .eq. 0 ) then
+    !       i = nprocs/j
+    !       if( abs(i-j) .lt. max) then
+    !           max = abs(i-j)
+    !           nx = i 
+    !           ny = j 
+    !       end if
+    !   end if
+    !end do
+  !return 
   end subroutine getNX_NY
 
      subroutine pack_global_22(in,   &

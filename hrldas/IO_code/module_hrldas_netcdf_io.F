@@ -44,6 +44,23 @@ module module_hrldas_netcdf_io
   integer, private :: dimid_layers_remember
   integer, private :: dimid_snow_layers_remember
 
+  !=====================================================================
+  ! MPAS unstructured-mesh geometry for MMF groundwater lateral flow
+  ! (Zhe Zhang, NCAR; regional serial + global MPI-decomposed runs).
+  ! Global mesh sizes, set by READ_MPAS_GEOMETRY_DIMS, used by
+  ! READ_MPAS_GEOMETRY consistency guards and GATHER_GLOBAL_WTD.
+  ! The geometry arrays themselves live in NoahmpIO (allocated at
+  ! GLOBAL size on every rank by READ_MPAS_GEOMETRY).
+  !=====================================================================
+  integer :: nCellsG   = -1
+  integer :: nEdgesG   = -1
+  integer :: maxEdgesG = -1
+
+  ! ---- parallel context (0/1/serial in non-MPI runs) ----
+  integer :: geom_myrank = 0
+  integer :: geom_nranks = 1
+  logical :: geom_mpi    = .false.
+
   interface prepare_output_file
 #ifdef MPP_LAND
      module procedure prepare_output_file_mpp
@@ -1960,7 +1977,7 @@ contains
           print '("dst(",I1,") = src(",I1,")*",F8.5," + src(",I1,")*",F8.5)', k, ktop, fraction, kbottom, (1.0-fraction)
        endif
 
-       var(:,k,:) = (src(:,ktop,:)*fraction) + (src(:,kbottom,:)*(1.0-fraction))
+       var(:,:,k) = (src(:,ktop,:)*fraction) + (src(:,kbottom,:)*(1.0-fraction))
 
     enddo KLOOP
      
@@ -4026,5 +4043,426 @@ contains
 
 !---------------------------------------------------------------------------------------------------------
 !---------------------------------------------------------------------------------------------------------
+
+
+!-------------------------------------------------------------------------------------------------------
+!  MPAS unstructured-mesh geometry for MMF groundwater lateral flow
+!  ----------------------------------------------------------------
+!  Design: geometry is GLOBAL ON EVERY RANK; only prognostic state is
+!  decomposed.  Serial regional run = (xstart=1, xend=nCells, 1 rank),
+!  the same code path as the MPI global run.  cellsOnCell carries
+!  GLOBAL cell ids; HRLDAS local arrays use global index bounds
+!  (xstart:xend), so owned-cell indexing needs no translation.
+!  LATERALFLOW must read neighbor water table depth from the gathered
+!  global vector (GATHER_GLOBAL_WTD), called once per STEPWTD.
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine geom_init_parallel_context()
+    ! Detect MPI at runtime so one code path serves serial and MPI runs.
+    implicit none
+#ifdef MPP_LAND
+    ! mpif.h-free: the mpi module is safe here because MPP_LAND builds
+    ! compile with mpif90 and link MPI. 
+    ! (block is compiled out entirely for serial builds)
+    call geom_mpi_context_query(geom_mpi, geom_myrank, geom_nranks)
+#else
+    geom_mpi = .false. ;  geom_myrank = 0 ;  geom_nranks = 1
+#endif 
+  end subroutine geom_init_parallel_context
+
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine geom_abort(msg)
+    !
+    ! Fatal-error exit that terminates the WHOLE MPI job.  A plain Fortran
+    ! STOP ends only the calling rank; surviving ranks then block forever
+    ! at the next collective (observed: 4x4 decomposition, 12 empty-patch
+    ! ranks stopped, 4 ranks hung in the init gather).  Under MPP_LAND we
+    ! call MPI_Abort; serial builds fall back to STOP.
+    !
+    implicit none
+    character(len=*), intent(in) :: msg
+    write(*,'("FATAL: ",A)') trim(msg)
+#ifdef MPP_LAND
+    call geom_mpi_abort()
+#endif
+    stop 1
+  end subroutine geom_abort
+
+#ifdef MPP_LAND
+  subroutine geom_mpi_abort()
+    use mpi
+    implicit none
+    integer :: ierr
+    call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+  end subroutine geom_mpi_abort
+#endif
+
+#ifdef MPP_LAND
+  subroutine geom_mpi_context_query(is_mpi, myrank, nranks)
+    use mpi
+    implicit none
+    logical, intent(out) :: is_mpi
+    integer, intent(out) :: myrank, nranks
+    integer :: ierr
+    logical :: flag
+    call MPI_Initialized(flag, ierr)
+    if (flag) then
+       is_mpi = .true.
+       call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
+       call MPI_Comm_size(MPI_COMM_WORLD, nranks, ierr)
+    else
+       is_mpi = .false. ;  myrank = 0 ;  nranks = 1
+    endif
+  end subroutine geom_mpi_context_query
+#endif
+
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine read_mpas_geometry_dims(flnm, nCells_out, nEdges_out, maxEdges_out)
+    implicit none
+    character(len=*), intent(in)  :: flnm
+    integer,          intent(out) :: nCells_out, nEdges_out, maxEdges_out
+    integer :: ncid, dimid, ierr
+
+    call geom_init_parallel_context()
+
+    ierr = nf90_open(trim(flnm), NF90_NOWRITE, ncid)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY_DIMS: cannot open mesh geometry file"
+
+    ierr = nf90_inq_dimid(ncid, "nCells", dimid)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY_DIMS: dimension nCells not found"
+    ierr = nf90_inquire_dimension(ncid, dimid, len=nCellsG)
+
+    ierr = nf90_inq_dimid(ncid, "nEdges", dimid)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY_DIMS: dimension nEdges not found"
+    ierr = nf90_inquire_dimension(ncid, dimid, len=nEdgesG)
+
+    ierr = nf90_inq_dimid(ncid, "maxEdges", dimid)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY_DIMS: dimension maxEdges not found"
+    ierr = nf90_inquire_dimension(ncid, dimid, len=maxEdgesG)
+
+    ierr = nf90_close(ncid)
+
+    nCells_out = nCellsG ;  nEdges_out = nEdgesG ;  maxEdges_out = maxEdgesG
+
+    if (geom_myrank == 0) then
+       write(*,'("READ_MPAS_GEOMETRY_DIMS: mesh geometry file: ",A)') trim(flnm)
+       write(*,'("READ_MPAS_GEOMETRY_DIMS: nCells = ",I0,"  nEdges = ",I0,"  maxEdges = ",I0)') &
+            nCellsG, nEdgesG, maxEdgesG
+       write(*,'("READ_MPAS_GEOMETRY_DIMS: MPI ranks = ",I0)') geom_nranks
+    endif
+  end subroutine read_mpas_geometry_dims
+
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine read_mpas_geometry(flnm, xstart, xend, ystart, yend,       &
+                                nCells, nEdges, maxEdges,               &
+                                nedgesoncell, cellsoncell,              &
+                                edgesoncell, bdymaskcell,               &
+                                dvedge, dcedge, areacell, areaxy)
+    !
+    ! Conforms to the driver call with NoahmpIO members:
+    !   call READ_MPAS_GEOMETRY(NoahmpIO%HRLDAS_SETUP_FILE,             &
+    !        NoahmpIO%XSTART, NoahmpIO%XEND, NoahmpIO%YSTART,           &
+    !        NoahmpIO%YEND, NoahmpIO%NCELLS, NoahmpIO%NEDGES,           &
+    !        NoahmpIO%MAXEDGES, NoahmpIO%NEDGESONCELL,                  &
+    !        NoahmpIO%CELLSONCELL, NoahmpIO%EDGESONCELL,                &
+    !        NoahmpIO%BDYMASKCELL, NoahmpIO%DVEDGE, NoahmpIO%DCEDGE,    &
+    !        NoahmpIO%AREACELL, NoahmpIO%AREAXY)
+    !
+    ! The NoahmpIO geometry members are (re)allocated HERE at GLOBAL
+    ! size on every rank.  AREAXY (decomposed, bounds xstart:xend) is
+    ! filled for owned cells only.
+    !
+    ! NOTE on kinds/attributes: all reals are plain `real`, matching
+    ! release-v5.0 conventions and the step-3 NoahmpIO declarations.
+    ! If your NoahmpIOVarType declares any geometry member as a
+    ! POINTER rather than ALLOCATABLE, change that dummy attribute
+    ! below to match -- pointer/allocatable must agree between the
+    ! actual and dummy argument.
+    !
+    implicit none
+    character(len=*), intent(in)    :: flnm
+    integer,          intent(in)    :: xstart, xend, ystart, yend
+    integer,          intent(in)    :: nCells, nEdges, maxEdges
+    integer, allocatable, intent(inout) :: nedgesoncell(:)      ! (nCells)
+    integer, allocatable, intent(inout) :: cellsoncell(:,:)     ! (maxEdges,nCells) GLOBAL ids
+    integer, allocatable, intent(inout) :: edgesoncell(:,:)     ! (maxEdges,nCells)
+    integer, allocatable, intent(inout) :: bdymaskcell(:)       ! (nCells)
+    real,    allocatable, intent(inout) :: dvedge(:)            ! (nEdges)
+    real,    allocatable, intent(inout) :: dcedge(:)            ! (nEdges)
+    real,    allocatable, intent(inout) :: areacell(:)          ! (nCells)
+    real                  , intent(inout) :: areaxy(xstart:,ystart:)
+
+    integer :: ncid, ierr
+    integer :: i, j, k, nb, nbad, nmiss
+    logical :: found
+
+    ! ---- 0. consistency guards (replace any local==global stop) ----
+    if (nCellsG < 1) &
+       call geom_abort("READ_MPAS_GEOMETRY: call READ_MPAS_GEOMETRY_DIMS first")
+    if (nCells /= nCellsG .or. nEdges /= nEdgesG .or. maxEdges /= maxEdgesG) then
+       write(*,'("READ_MPAS_GEOMETRY: argument dims (",I0,",",I0,",",I0, &
+                &") disagree with mesh file (",I0,",",I0,",",I0,")")')   &
+            nCells, nEdges, maxEdges, nCellsG, nEdgesG, maxEdgesG
+       call geom_abort("READ_MPAS_GEOMETRY: dimension arguments disagree with mesh file")
+    endif
+    if (ystart /= 1 .or. yend /= 1) then
+       write(*,'("READ_MPAS_GEOMETRY: rank ",I0," has y-extent ",I0,":",I0, &
+                &" -- vector mesh requires 1:1")') geom_myrank, ystart, yend
+       call geom_abort("READ_MPAS_GEOMETRY: decomposition must be x-only for vector mesh")
+    endif
+    if (xstart < 1 .or. xend > nCellsG .or. xend < xstart) then
+       write(*,'("READ_MPAS_GEOMETRY: rank ",I0," patch [",I0,":",I0, &
+                &"] outside mesh 1..",I0)') geom_myrank, xstart, xend, nCellsG
+       call geom_abort("READ_MPAS_GEOMETRY: local patch incompatible with mesh")
+    endif
+
+    ! ---- 1. (re)allocate NoahmpIO geometry members at GLOBAL size ----
+    !         (deallocate first in case the driver pre-allocated them
+    !          at patch size -- the cause of the earlier segfaults)
+    if (allocated(nedgesoncell)) deallocate(nedgesoncell)
+    if (allocated(cellsoncell))  deallocate(cellsoncell)
+    if (allocated(edgesoncell))  deallocate(edgesoncell)
+    if (allocated(bdymaskcell))  deallocate(bdymaskcell)
+    if (allocated(dvedge))       deallocate(dvedge)
+    if (allocated(dcedge))       deallocate(dcedge)
+    if (allocated(areacell))     deallocate(areacell)
+    allocate( nedgesoncell(nCellsG)           )
+    allocate( cellsoncell (maxEdgesG,nCellsG) )
+    allocate( edgesoncell (maxEdgesG,nCellsG) )
+    allocate( bdymaskcell (nCellsG)           )
+    allocate( dvedge      (nEdgesG)           )
+    allocate( dcedge      (nEdgesG)           )
+    allocate( areacell    (nCellsG)           )
+
+    ! ---- 2. full global reads on every rank ----
+    ierr = nf90_open(trim(flnm), NF90_NOWRITE, ncid)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY: cannot open mesh geometry file"
+
+    call geom_get_int_1d (ncid, "nEdgesOnCell", nedgesoncell)
+    call geom_get_int_2d (ncid, "cellsOnCell",  cellsoncell )
+    call geom_get_int_2d (ncid, "edgesOnCell",  edgesoncell )
+    call geom_get_int_1d (ncid, "bdyMaskCell",  bdymaskcell )
+    call geom_get_real_1d(ncid, "dvEdge",       dvedge      )
+    call geom_get_real_1d(ncid, "dcEdge",       dcedge      )
+    call geom_get_real_1d(ncid, "areaCell",     areacell    )
+
+    ierr = nf90_close(ncid)
+    
+    ! ---- 3. neighbor-symmetry check: rank 0 only ----
+    !         (identical global data on all ranks; avoids nranks-fold
+    !          log spam and redundant work)
+    if (geom_myrank == 0) then
+       nbad  = 0
+       nmiss = 0
+       do i = 1, nCellsG
+          do j = 1, nedgesoncell(i)
+             nb = cellsoncell(j,i)
+             if ( (nb >= 1) .and. (nb <= nCellsG) ) then
+                found = .false.
+                do k = 1, nedgesoncell(nb)
+                   if ( cellsoncell(k,nb) == i ) then
+                      found = .true. ;  exit
+                   endif
+                enddo
+                if (.not. found) nbad = nbad + 1
+             else
+                nmiss = nmiss + 1      ! regional cutout boundary; 0 on the sphere
+             endif
+          enddo
+       enddo
+       write(*,'("READ_MPAS_GEOMETRY: neighbor symmetry violations = ",I0," (expect 0)")') nbad
+       write(*,'("READ_MPAS_GEOMETRY: missing-neighbor active slots = ",I0, &
+                &" (regional boundary; 0 for global mesh)")') nmiss
+       if (nbad > 0) then
+          write(*,'("READ_MPAS_GEOMETRY: neighbor symmetry FAILED.")')
+          write(*,'("   Most likely cause: cellsOnCell read transposed;")')
+          write(*,'("   expected Fortran layout cellsOnCell(maxEdges,nCells).")')
+          call geom_abort("READ_MPAS_GEOMETRY: cellsOnCell symmetry check failed")
+       endif
+       write(*,'("READ_MPAS_GEOMETRY: areaCell min=",ES12.4,"  max=",ES12.4," m2")') &
+            minval(areacell), maxval(areacell)
+    endif
+   
+    ! ---- 4. AREAXY for the OWNED patch only (identity index map) ----
+    do i = xstart, xend
+       areaxy(i,ystart) = areacell(i)
+    enddo
+
+    write(*,'("READ_MPAS_GEOMETRY: rank ",I0," owns cells ",I0,":",I0," (",I0," cells)")') &
+         geom_myrank, xstart, xend, xend-xstart+1
+
+  end subroutine read_mpas_geometry
+
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine gather_global_wtd(zwt_local, xstart, xend, zwt_glob)
+    !
+    ! Assemble the GLOBAL water-table-depth vector for the lateral-flow
+    ! neighbor loop.  Call once per groundwater step (STEPWTD), BEFORE
+    ! LATERALFLOW; the neighbor loop then reads zwt_glob(nb) with the
+    ! global ids from cellsOnCell while looping owned cells only.
+    ! ~10 MB allgather at 2.6M cells; negligible per 3 h interval.
+    ! Serial / 1-rank degenerates to a copy: same code path.
+    !
+    implicit none
+    integer, intent(in)  :: xstart, xend
+    real                  , intent(in)  :: zwt_local(xstart:xend)
+    real                  , intent(out) :: zwt_glob(:)   ! assumed shape: matches
+                                          ! gather_global_iface in NoahmpIOVarType
+                                          ! (procedure-pointer interface)
+
+    if (size(zwt_glob) /= nCellsG) &
+       call geom_abort("GATHER_GLOBAL_WTD: global buffer size /= nCells")
+    if (.not. geom_mpi .or. geom_nranks == 1) then
+       zwt_glob(xstart:xend) = zwt_local
+       return
+    endif
+#ifdef MPP_LAND
+    call geom_allgather_wtd(zwt_local, xstart, xend, zwt_glob)
+#else
+    call geom_abort("GATHER_GLOBAL_WTD: multi-rank run without MPP_LAND build")
+#endif
+  end subroutine gather_global_wtd
+
+!-------------------------------------------------------------------------------------------------------
+
+  function global_sum_int(n) result(nsum)
+    !
+    ! Sum an integer across all ranks (serial / 1-rank: identity).
+    ! Matches global_sum_int_iface in NoahmpIOVarType; the driver
+    ! associates NoahmpIO%globalSumInt with this function.  Used by the
+    ! groundwater-init EQZWT iteration for collective safety.
+    !
+    implicit none
+    integer, intent(in) :: n
+    integer             :: nsum
+
+    if (.not. geom_mpi .or. geom_nranks == 1) then
+       nsum = n
+       return
+    endif
+#ifdef MPP_LAND
+    call geom_allreduce_sum_int(n, nsum)
+#else
+    call geom_abort("GLOBAL_SUM_INT: multi-rank run without MPP_LAND build")
+#endif
+  end function global_sum_int
+
+#ifdef MPP_LAND
+  subroutine geom_allreduce_sum_int(n, nsum)
+    use mpi
+    implicit none
+    integer, intent(in)  :: n
+    integer, intent(out) :: nsum
+    integer :: ierr
+    call MPI_Allreduce(n, nsum, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr)
+  end subroutine geom_allreduce_sum_int
+#endif
+
+#ifdef MPP_LAND
+  subroutine geom_allgather_wtd(zwt_local, xstart, xend, zwt_glob)
+    use mpi
+    implicit none
+    integer, intent(in)  :: xstart, xend
+    real                  , intent(in)  :: zwt_local(xstart:xend)
+    real                  , intent(out) :: zwt_glob(:)
+
+    integer              :: ierr, nlocal, r, mpi_wtd_type
+    integer, allocatable :: counts(:), displs(:), starts(:)
+    integer, save        :: geom_tiling_checked = 0
+
+    ! MPI datatype for default real (single precision build)
+    if (kind(1.0) == kind(1.0d0)) then   ! always false for default single
+       mpi_wtd_type = MPI_DOUBLE_PRECISION
+    else
+       mpi_wtd_type = MPI_REAL
+    endif
+
+    nlocal = xend - xstart + 1
+
+    allocate(counts(geom_nranks), displs(geom_nranks), starts(geom_nranks))
+    call MPI_Allgather(nlocal, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, &
+                       MPI_COMM_WORLD, ierr)
+    call MPI_Allgather(xstart, 1, MPI_INTEGER, starts, 1, MPI_INTEGER, &
+                       MPI_COMM_WORLD, ierr)
+    displs = starts - 1     ! patch [xstart:xend] -> global offset xstart-1
+
+    ! one-time tiling check: patches must cover 1..nCellsG exactly
+    if (geom_tiling_checked == 0) then
+       if (sum(counts) /= nCellsG) then
+          if (geom_myrank == 0) &
+             write(*,'("GATHER_GLOBAL_WTD: patches sum to ",I0," /= nCells ",I0)') &
+                  sum(counts), nCellsG
+          call geom_abort("GATHER_GLOBAL_WTD: decomposition does not tile the mesh")
+       endif
+       if (geom_myrank == 0) then
+          do r = 1, geom_nranks
+             write(*,'("GATHER_GLOBAL_WTD: rank ",I0," patch offset ",I0," count ",I0)') &
+                  r-1, displs(r), counts(r)
+          enddo
+       endif
+       geom_tiling_checked = 1
+    endif
+
+    call MPI_Allgatherv(zwt_local, nlocal, mpi_wtd_type, &
+                        zwt_glob, counts, displs, mpi_wtd_type, &
+                        MPI_COMM_WORLD, ierr)
+    deallocate(counts, displs, starts)
+  end subroutine geom_allgather_wtd
+#endif
+
+!-------------------------------------------------------------------------------------------------------
+!  typed geometry readers: full-variable reads into GLOBALLY sized
+!  arrays; every varid checked so no unchecked inquire can segfault
+!  a subsequent get_var
+!-------------------------------------------------------------------------------------------------------
+
+  subroutine geom_get_int_1d(ncid, name, arr)
+    implicit none
+    integer,          intent(in)  :: ncid
+    character(len=*), intent(in)  :: name
+    integer,          intent(out) :: arr(:)
+    integer :: varid, ierr
+    ierr = nf90_inq_varid(ncid, trim(name), varid)
+    if (ierr /= NF90_NOERR) then
+       write(*,'("READ_MPAS_GEOMETRY: variable not found: ",A)') trim(name)
+       call geom_abort("READ_MPAS_GEOMETRY: missing mesh variable")
+    endif
+    ierr = nf90_get_var(ncid, varid, arr)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY: get_var failed (int 1d)"
+  end subroutine geom_get_int_1d
+
+  subroutine geom_get_int_2d(ncid, name, arr)
+    implicit none
+    integer,          intent(in)  :: ncid
+    character(len=*), intent(in)  :: name
+    integer,          intent(out) :: arr(:,:)    ! Fortran (maxEdges,nCells)
+    integer :: varid, ierr
+    ierr = nf90_inq_varid(ncid, trim(name), varid)
+    if (ierr /= NF90_NOERR) then
+       write(*,'("READ_MPAS_GEOMETRY: variable not found: ",A)') trim(name)
+       call geom_abort("READ_MPAS_GEOMETRY: missing mesh variable")
+    endif
+    ierr = nf90_get_var(ncid, varid, arr)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY: get_var failed (int 2d)"
+  end subroutine geom_get_int_2d
+
+  subroutine geom_get_real_1d(ncid, name, arr)
+    implicit none
+    integer,          intent(in)  :: ncid
+    character(len=*), intent(in)  :: name
+    real,             intent(out) :: arr(:)
+    integer :: varid, ierr
+    ierr = nf90_inq_varid(ncid, trim(name), varid)
+    if (ierr /= NF90_NOERR) then
+       write(*,'("READ_MPAS_GEOMETRY: variable not found: ",A)') trim(name)
+       call geom_abort("READ_MPAS_GEOMETRY: missing mesh variable")
+    endif
+    ierr = nf90_get_var(ncid, varid, arr)
+    if (ierr /= NF90_NOERR) stop "READ_MPAS_GEOMETRY: get_var failed (real 1d)"
+  end subroutine geom_get_real_1d
 
  end module module_hrldas_netcdf_io

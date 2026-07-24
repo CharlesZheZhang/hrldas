@@ -263,12 +263,45 @@ contains
   
 !------------------------------------------------------------------------
 ! For IOPT_RUNSUB = 5 (MMF groundwater), read in necessary extra fields
-! This option is not tested for parallel use in the offline driver
+! Runs serial or MPI-decomposed: geometry is global on every rank; the
+! physics gathers neighbor state through NoahmpIO%gatherGlobal (below).
 !------------------------------------------------------------------------
 
     if (NoahmpIO%IOPT_RUNSUB == 5) then
        call READ_MMF_RUNOFF(NoahmpIO%HRLDAS_SETUP_FILE, NoahmpIO%XSTART, NoahmpIO%XEND, NoahmpIO%YSTART, NoahmpIO%YEND,&
                             NoahmpIO%FDEPTHXY, NoahmpIO%EQZWT, NoahmpIO%RECHCLIM, NoahmpIO%RIVERBEDXY)
+
+       ! MPAS mesh geometry/connectivity for unstructured MMF lateral flow.
+       ! Phase 1: inquire dims; then allocate; Phase 2: read + verify + fill AREAXY.
+       call READ_MPAS_GEOMETRY_DIMS(NoahmpIO%HRLDAS_SETUP_FILE, &
+                                    NoahmpIO%NCELLS, NoahmpIO%NEDGES, NoahmpIO%MAXEDGES)
+       allocate( NoahmpIO%NEDGESONCELL(NoahmpIO%NCELLS)                    )
+       allocate( NoahmpIO%CELLSONCELL (NoahmpIO%MAXEDGES, NoahmpIO%NCELLS) )
+       allocate( NoahmpIO%EDGESONCELL (NoahmpIO%MAXEDGES, NoahmpIO%NCELLS) )
+       allocate( NoahmpIO%BDYMASKCELL (NoahmpIO%NCELLS)                    )
+       allocate( NoahmpIO%DVEDGE      (NoahmpIO%NEDGES)                    )
+       allocate( NoahmpIO%DCEDGE      (NoahmpIO%NEDGES)                    )
+       allocate( NoahmpIO%AREACELL    (NoahmpIO%NCELLS)                    )
+
+       call READ_MPAS_GEOMETRY(NoahmpIO%HRLDAS_SETUP_FILE,                          &
+                               NoahmpIO%XSTART, NoahmpIO%XEND,                      &
+                               NoahmpIO%YSTART, NoahmpIO%YEND,                      &
+                               NoahmpIO%NCELLS, NoahmpIO%NEDGES, NoahmpIO%MAXEDGES, &
+                               NoahmpIO%NEDGESONCELL, NoahmpIO%CELLSONCELL,         &
+                               NoahmpIO%EDGESONCELL,  NoahmpIO%BDYMASKCELL,         &
+                               NoahmpIO%DVEDGE, NoahmpIO%DCEDGE, NoahmpIO%AREACELL, &
+                               NoahmpIO%AREAXY)
+       NoahmpIO%FLAG_UNSTRUCTURED = .true.
+
+       ! Associate the parallel services the MMF physics calls through
+       ! NoahmpIO (see abstract interfaces in NoahmpIOVarType).  The physics
+       ! compiles before IO_code, so it cannot use this module directly;
+       ! these pointers are the only bridge.  Both routines degenerate
+       ! correctly in serial (copy / identity), so this is unconditional.
+       NoahmpIO%gatherGlobal => gather_global_wtd
+       NoahmpIO%globalSumInt => global_sum_int
+       write(*,*) "Successfully Reading MPAS Geometry and Dimension!!!"
+       write(*,*) "Setting unstructured grid to TRUE!!!"
     endif
 
 !------------------------------------------------------------------------
